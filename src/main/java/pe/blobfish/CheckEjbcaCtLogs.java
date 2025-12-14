@@ -45,7 +45,9 @@ public class CheckEjbcaCtLogs {
                         LinkedHashMap<Integer, CTLogInfo> ejbcaCtLogs = (LinkedHashMap) deserializedObject.get("ctlogs");
 
                         // TODO support to receive an indefinite size list of JSONs to intersect as arguments
+//                        Map<String, Log> googleCtLogList = loadJsonLogList("google_log_list.json");
                         Map<String, Log> googleCtLogList = loadJsonLogList("https://www.gstatic.com/ct/log_list/v3/log_list.json");
+//                        Map<String, Log> appleCtLogList = loadJsonLogList("apple_current_log_list.json");
                         Map<String, Log> appleCtLogList = loadJsonLogList("https://valid.apple.com/ct/log_list/current_log_list.json");
 
                         List<String> intersectionLogIds = new ArrayList<>(googleCtLogList.keySet());
@@ -119,6 +121,37 @@ public class CheckEjbcaCtLogs {
                             }
                         }
 
+                        // Check for expired logs in EJBCA configuration
+                        for (CTLogInfo ejbcaCtLog : ejbcaCtLogs.values()) {
+                            ZonedDateTime currentTime = ZonedDateTime.now();
+                            ZonedDateTime logEndTime = null;
+                            
+                            // Determine the end time based on available fields
+                            if (ejbcaCtLog.getExpirationYearRequired() != null) {
+                                // If expiration year is set, the log expires at the end of that year
+                                logEndTime = ZonedDateTime.of(ejbcaCtLog.getExpirationYearRequired() + 1, 1, 1, 0, 0, 0, 0, java.time.ZoneId.of("Z"));
+                            } else if (ejbcaCtLog.getIntervalEnd() != null) {
+                                // If interval end is set, use that
+                                logEndTime = ZonedDateTime.ofInstant(ejbcaCtLog.getIntervalEnd().toInstant(), java.time.ZoneId.of("Z"));
+                            }
+                            
+                            // Check if the log has expired
+                            if (logEndTime != null && currentTime.isAfter(logEndTime)) {
+                                String ejbcaPublicKeySha256 = java.util.Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(ejbcaCtLog.getPublicKeyBytes()));
+                                System.out.println("Expired log in EJBCA: " + ejbcaPublicKeySha256 + " (" + ejbcaCtLog.getUrl() + "), end_exclusive: " + logEndTime);
+                                isWarning = true;
+                            }
+                        }
+
+                        // Check for stale logs in EJBCA (logs that are not in the eligible CT logs list)
+                        for (CTLogInfo ejbcaCtLog : ejbcaCtLogs.values()) {
+                            String ejbcaPublicKeySha256 = java.util.Base64.getEncoder().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(ejbcaCtLog.getPublicKeyBytes()));
+                            if (!eligibleCtLogs.contains(ejbcaPublicKeySha256)) {
+                                System.out.println("Stale log in EJBCA: " + ejbcaPublicKeySha256 + " (" + ejbcaCtLog.getUrl() + ") - not found in eligible CT logs");
+                                isWarning = true;
+                            }
+                        }
+
                         if (isCritical) {
                             System.exit(2);
                         } else if (isWarning) {
@@ -170,8 +203,19 @@ public class CheckEjbcaCtLogs {
         Map<String, Log> logWithOperatorList = new HashMap<>();
         for (Operator operator : logList.getOperators()) {
             // TODO allow to optionally exclude some operators, e.g. when they don't support our roots.
-            for (Log log : operator.getLogs()) {
-                logWithOperatorList.put(log.getLogId(), log);
+            
+            // Process regular logs
+            if (operator.getLogs() != null) {
+                for (Log log : operator.getLogs()) {
+                    logWithOperatorList.put(log.getLogId(), log);
+                }
+            }
+            
+            // Process tiled logs (which use submission_url instead of url)
+            if (operator.getTiledLogs() != null) {
+                for (Log log : operator.getTiledLogs()) {
+                    logWithOperatorList.put(log.getLogId(), log);
+                }
             }
         }
         return logWithOperatorList;
@@ -215,6 +259,7 @@ class Operator {
     private String name;
     private List<String> email;
     private List<Log> logs;
+    private List<Log> tiled_logs;
 
     public String getName() {
         return name;
@@ -239,6 +284,15 @@ class Operator {
     public void setLogs(List<Log> logs) {
         this.logs = logs;
     }
+
+    @com.fasterxml.jackson.annotation.JsonProperty("tiled_logs")
+    public List<Log> getTiledLogs() {
+        return tiled_logs;
+    }
+
+    public void setTiledLogs(List<Log> tiled_logs) {
+        this.tiled_logs = tiled_logs;
+    }
 }
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -247,6 +301,7 @@ class Log {
     private String log_id;
     private String key;
     private String url;
+    private String submission_url;
     private int mmd;
     private Map<String, Object> state;
     private TemporalInterval temporal_interval;
@@ -277,11 +332,21 @@ class Log {
     }
 
     public String getUrl() {
-        return url;
+        // For tiled logs, use submission_url if url is not available
+        return url != null ? url : submission_url;
     }
 
     public void setUrl(String url) {
         this.url = url;
+    }
+
+    @com.fasterxml.jackson.annotation.JsonProperty("submission_url")
+    public String getSubmissionUrl() {
+        return submission_url;
+    }
+
+    public void setSubmissionUrl(String submission_url) {
+        this.submission_url = submission_url;
     }
 
     public int getMmd() {
